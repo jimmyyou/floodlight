@@ -39,5 +39,7 @@ public class FlowInstaller implements IFloodlightModule {
         // Start the FlowModSetter to listen for incoming rules from
         // the GAIA controller and set the rules on switches.
         (new Thread(new FlowModSetter(switchService))).start();
+
+        (new Thread(new BaselineFlowModListener(switchService))).start(); // the thread for baseline emulation
     }
 }
