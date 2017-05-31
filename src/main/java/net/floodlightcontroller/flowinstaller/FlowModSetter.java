@@ -1,16 +1,12 @@
 package net.floodlightcontroller.flowinstaller;
 
-import java.io.File;
-import java.io.FileReader;
-import java.io.FileWriter;
-import java.io.BufferedReader;
+import java.io.*;
 import java.util.ArrayList;
 import java.util.List;
 
 import net.floodlightcontroller.core.IOFSwitch;
 import net.floodlightcontroller.core.internal.IOFSwitchService;
 
-import org.projectfloodlight.openflow.protocol.OFFlowMod;
 import org.projectfloodlight.openflow.protocol.OFFlowAdd;
 import org.projectfloodlight.openflow.protocol.action.OFAction;
 import org.projectfloodlight.openflow.protocol.action.OFActionOutput;
@@ -25,16 +21,22 @@ import org.projectfloodlight.openflow.types.IPv4Address;
 import org.projectfloodlight.openflow.types.IpProtocol;
 import org.projectfloodlight.openflow.types.OFPort;
 import org.projectfloodlight.openflow.types.TransportPort;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+// Ver 1.1 moved the functionality of Baseline Flow Mod Setting to here
+// the first message: [num_needed] for rrf , [num_Sw] [num_Node] for baseline
 
 public class FlowModSetter implements Runnable {
-    protected IOFSwitchService switchService_;
+    protected IOFSwitchService switchService;
+    private Logger log = LoggerFactory.getLogger(FlowModSetter.class);
 
     public FlowModSetter(IOFSwitchService switchService) {
-        switchService_ = switchService;
+        this.switchService = switchService;
     }
+    BufferedReader br = null;
 
     public void run() {
-        BufferedReader br = null;
         String buf_str = null;
         // Set up the fifo we'll receive from
         try {
@@ -56,8 +58,90 @@ public class FlowModSetter implements Runnable {
             System.exit(1);
         }
 
-        int num_needed = Integer.parseInt(buf_str);
-        System.out.println("need " + num_needed);
+        String [] split = buf_str.split(" ");
+        if(split.length == 1){
+            int num_needed = Integer.parseInt(buf_str);
+            System.out.println("need " + num_needed);
+            parseCoflowRules(num_needed);
+        }
+        else if (split.length == 2){
+            int numSw = Integer.parseInt(split[0]);
+            int numNode = Integer.parseInt(split[1]);
+            parseBaselineRules(numSw , numNode);
+        }
+        else {
+            log.error("Received un expected first message: " + buf_str);
+        }
+
+    }
+
+    private void parseBaselineRules(int numSw, int numNode) {
+        System.out.println("Expect to receive " + numSw + " * " + numNode + " = " + (numSw * numNode) + " messages" );
+
+        // receives m * n messages, each containing routing for 1 nodes
+        for (int i = 0 ; i < numSw ; i++ ){
+            for (int j = 0 ; j < numNode ; j++ ){
+
+                String msg = null;
+                try {
+                    msg = br.readLine();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                    System.exit(1);
+                }
+
+                System.out.println(msg);
+
+                String [] split = msg.split(" ");
+                assert (split.length != 3);
+                int dpID = Integer.parseInt(split[0]);
+                String dstIP = split[1];
+                int outPort = Integer.parseInt(split[2]);
+
+                // Set the rules
+                IOFSwitch sw = switchService.getSwitch(DatapathId.of(dpID));
+
+                // Set the match for the FlowMod based on the info we received
+                // Match IPv4, TCP, dst_IP, don't match the port
+                Match m = sw.getOFFactory().buildMatch()
+                        .setExact(MatchField.ETH_TYPE, EthType.IPv4)
+                        .setExact(MatchField.IPV4_DST, IPv4Address.of(dstIP))
+                        .setExact(MatchField.IP_PROTO, IpProtocol.TCP)
+                        .build();
+
+                // Set the FlowMod's action to forward packets through out_port
+                OFActionOutput.Builder aob = sw.getOFFactory().actions().buildOutput();
+                aob.setPort(OFPort.of(outPort));
+                List<OFAction> actions = new ArrayList<OFAction>();
+                actions.add(aob.build());
+
+                OFInstructions ib = sw.getOFFactory().instructions();
+                OFInstructionApplyActions applyActions = ib.buildApplyActions()
+                        .setActions(actions)
+                        .build();
+                List<OFInstruction> instructions = new ArrayList<OFInstruction>();
+                instructions.add(applyActions);
+
+                // Use priority 100?
+                OFFlowAdd fm = sw.getOFFactory().buildFlowAdd()
+                        .setMatch(m)
+                        .setPriority(100)
+                        .setOutPort(OFPort.of(outPort))
+                        .setInstructions(instructions)
+                        .build();
+
+                sw.write(fm);
+
+            } // end of n messages for one switch
+        } // end of all m*n messages
+
+        // Send back ACK after setting up the rules
+        replyACK();
+        log.info("Sent ACK back to GAIA");
+    }
+
+    private void parseCoflowRules(int num_needed) {
+        String buf_str = null;
 
         int num_recv = 0;
         String msg_id, mod_src_ip, mod_dst_ip, src_ip_suffix, dst_ip_suffix;
@@ -67,7 +151,7 @@ public class FlowModSetter implements Runnable {
             // Receive a metadata message from the GAIA controller
             // Metadata is of form:
             //      msg_id num_rules src_id dst_id src_port dst_port
-            //      
+            //
             // msg_id:      used to keep track of how many rules the OF controller will set
             // num_rules:   how many rules will be set for this msg_id
             // src_id:      id of path source
@@ -99,7 +183,7 @@ public class FlowModSetter implements Runnable {
             // Receive each of the rules for this path message
             // Individual messages are of form:
             //      msg_id dpid out_port fwd_or_rev
-            // 
+            //
             // dpid:        id of switch to be programmed
             // out_port:    interface through which packets should be forwarded
             // fwd_or_rev:  0 means this rule is for the forward direction,
@@ -131,7 +215,7 @@ public class FlowModSetter implements Runnable {
                 forward = msg_splits[3].equals("0");
 
                 System.out.println(buf_str);
-                
+
                 // If this rule is for the reverse path (TCP ACKs),
                 // switch the src and dst values.
                 if (forward) {
@@ -147,17 +231,17 @@ public class FlowModSetter implements Runnable {
                     mod_dst_port = src_port;
                 }
 
-                IOFSwitch sw = switchService_.getSwitch(DatapathId.of(dpid));
+                IOFSwitch sw = switchService.getSwitch(DatapathId.of(dpid));
 
                 // Set the match for the FlowMod based on the info we received
                 Match m = sw.getOFFactory().buildMatch()
-                    .setExact(MatchField.ETH_TYPE, EthType.IPv4)
-                    .setExact(MatchField.IPV4_SRC, IPv4Address.of(mod_src_ip))
-                    .setExact(MatchField.IPV4_DST, IPv4Address.of(mod_dst_ip))
-                    .setExact(MatchField.IP_PROTO, IpProtocol.TCP)
-                    .setExact(MatchField.TCP_SRC, TransportPort.of(mod_src_port))
-                    .setExact(MatchField.TCP_DST, TransportPort.of(mod_dst_port))
-                    .build();
+                        .setExact(MatchField.ETH_TYPE, EthType.IPv4)
+                        .setExact(MatchField.IPV4_SRC, IPv4Address.of(mod_src_ip))
+                        .setExact(MatchField.IPV4_DST, IPv4Address.of(mod_dst_ip))
+                        .setExact(MatchField.IP_PROTO, IpProtocol.TCP)
+                        .setExact(MatchField.TCP_SRC, TransportPort.of(mod_src_port))
+                        .setExact(MatchField.TCP_DST, TransportPort.of(mod_dst_port))
+                        .build();
 
                 // Set the FlowMod's action to forward packets through out_port
                 OFActionOutput.Builder aob = sw.getOFFactory().actions().buildOutput();
@@ -167,23 +251,28 @@ public class FlowModSetter implements Runnable {
 
                 OFInstructions ib = sw.getOFFactory().instructions();
                 OFInstructionApplyActions applyActions = ib.buildApplyActions()
-                    .setActions(actions)
-                    .build();
+                        .setActions(actions)
+                        .build();
                 List<OFInstruction> instructions = new ArrayList<OFInstruction>();
                 instructions.add(applyActions);
 
                 OFFlowAdd fm = sw.getOFFactory().buildFlowAdd()
-                    .setMatch(m)
-                    .setPriority(100)
-                    .setOutPort(OFPort.of(out_port))
-                    .setInstructions(instructions)
-                    .build();
+                        .setMatch(m)
+                        .setPriority(100)
+                        .setOutPort(OFPort.of(out_port))
+                        .setInstructions(instructions)
+                        .build();
 
                 sw.write(fm);
             }
 
             num_recv++;
-        }
+        } // end of receiving messages
+
+        replyACK();
+    }
+
+    private void replyACK(){
         // Set up the fifo that we'll write to
         try {
             br.close();
@@ -200,6 +289,5 @@ public class FlowModSetter implements Runnable {
             e.printStackTrace();
             System.exit(1);
         }
-
     }
 }
