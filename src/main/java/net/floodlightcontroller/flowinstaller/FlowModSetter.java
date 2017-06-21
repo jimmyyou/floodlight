@@ -61,16 +61,17 @@ public class FlowModSetter implements Runnable {
         String [] split = buf_str.split(" ");
         if(split.length == 1){
             int num_needed = Integer.parseInt(buf_str);
-            System.out.println("need " + num_needed);
+            System.out.println("Enter gaia mode:\n need " + num_needed);
             parseCoflowRules(num_needed);
         }
         else if (split.length == 2){
             int numSw = Integer.parseInt(split[0]);
             int numNode = Integer.parseInt(split[1]);
+            System.out.println("Enter baseline mode:");
             parseBaselineRules(numSw , numNode);
         }
         else {
-            log.error("Received un expected first message: " + buf_str);
+            log.error("Received unexpected first message: " + buf_str);
         }
 
     }
