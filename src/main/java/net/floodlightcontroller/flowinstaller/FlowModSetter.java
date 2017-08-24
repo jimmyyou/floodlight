@@ -8,6 +8,7 @@ import net.floodlightcontroller.core.IOFSwitch;
 import net.floodlightcontroller.core.internal.IOFSwitchService;
 
 import org.projectfloodlight.openflow.protocol.OFFlowAdd;
+import org.projectfloodlight.openflow.protocol.OFFlowDelete;
 import org.projectfloodlight.openflow.protocol.action.OFAction;
 import org.projectfloodlight.openflow.protocol.action.OFActionOutput;
 import org.projectfloodlight.openflow.protocol.match.Match;
@@ -48,30 +49,54 @@ public class FlowModSetter implements Runnable {
             FileReader fr = new FileReader(f);
             br = new BufferedReader(fr);
 
-            // The first message from the GAIA controller contains
-            // the number of messages we will receive (the number of
-            // unique msg_ids that we'll receive).
-            buf_str = br.readLine();
+            log.info("Entering control loop");
+
+            while (true) {
+                buf_str = br.readLine();
+                // The first message from the GAIA controller contains
+                // the number of messages we will receive (the number of
+                // unique msg_ids that we'll receive).
+                String[] split = buf_str.split(" ");
+                if (split.length == 1) {
+                    int num_needed = Integer.parseInt(buf_str);
+                    System.out.println("Enter gaia mode:\n need " + num_needed);
+                    parseCoflowRules(num_needed);
+                } else if (split.length == 2) {
+                    int numSw = Integer.parseInt(split[0]);
+                    int numNode = Integer.parseInt(split[1]);
+                    System.out.println("Enter baseline mode:");
+                    parseBaselineRules(numSw, numNode);
+                } else { // we clean up the flow rules
+                    log.error("Received other command message: {}, clean up flow rules" , buf_str);
+                    cleanFlowRules();
+                }
+            }
+
         }
         catch (Exception e) {
             e.printStackTrace();
-            System.exit(1);
+//            System.exit(1);
         }
 
-        String [] split = buf_str.split(" ");
-        if(split.length == 1){
-            int num_needed = Integer.parseInt(buf_str);
-            System.out.println("Enter gaia mode:\n need " + num_needed);
-            parseCoflowRules(num_needed);
-        }
-        else if (split.length == 2){
-            int numSw = Integer.parseInt(split[0]);
-            int numNode = Integer.parseInt(split[1]);
-            System.out.println("Enter baseline mode:");
-            parseBaselineRules(numSw , numNode);
-        }
-        else {
-            log.error("Received unexpected first message: " + buf_str);
+
+
+    }
+
+    private void cleanFlowRules() {
+
+        for ( DatapathId dpid : switchService.getAllSwitchDpids()){
+
+            IOFSwitch sw = switchService.getSwitch(dpid);
+            Match m = sw.getOFFactory().buildMatch()
+                    .setExact(MatchField.ETH_TYPE, EthType.IPv4)
+                    .build();
+
+            OFFlowDelete fdel = sw.getOFFactory().buildFlowDelete()
+                    .setMatch(m)
+                    .setPriority(100) // only match priority 100
+                    .build();
+
+            sw.write(fdel);
         }
 
     }
